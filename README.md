@@ -94,8 +94,9 @@ There are two separate kinds of data, treated differently:
 
 **Your production data** — the 15-minute average power (kW), the slot timestamp,
 and the sample count. This is tied to the site you registered, under your
-account. It is **not** shared publicly or with third parties. You can revoke the
-link anytime by removing the integration and deleting the site on the website.
+account. It is **not** shared publicly or with third parties. To stop sharing and
+erase this data, delete your installation on the Kilowattlas website — see
+*Stopping and removing* below.
 
 **Your site's static metadata** — its location, capacity, and source type
 (solar). By using this integration you agree that this metadata is contributed
@@ -114,6 +115,35 @@ Please read this before you connect:
   data, **do not connect this integration.**
 - No personal identifiers (your name, account, or email) are shared with
   OpenStreetMap — only the installation's location, capacity, and source type.
+
+## Stopping and removing
+
+There are two independent things — stopping the integration in Home Assistant,
+and deleting your data on Kilowattlas. Doing one does **not** do the other.
+
+**Remove the integration (Home Assistant side):**
+Settings → Devices & Services → *Kilowattlas – Trace the Sun* → ⋮ → **Delete**.
+This immediately:
+
+- stops sampling and pushing,
+- removes the sensors and the local offline buffer.
+
+It does **not** by itself delete anything stored on Kilowattlas — your
+installation and its production history remain on the server until you delete
+them there (below).
+
+**Delete your data (Kilowattlas side):**
+Sign in on the Kilowattlas website and delete your installation. This:
+
+- stops accepting any further data and disables the sharing token, and
+- erases your production history.
+
+Your installation's static metadata (location, capacity) is **kept** — it was
+contributed to OpenStreetMap and stays on the map, consistent with the
+[OpenStreetMap copy](#privacy--data-sharing) which is public and permanent.
+
+> For a full stop, do both: delete the installation on the website, then remove
+> the integration in Home Assistant.
 
 ## How it works
 
