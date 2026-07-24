@@ -1,4 +1,4 @@
-# Kilowattlas Solar Sharing — Home Assistant integration
+# Kilowattlas – Trace the Sun · Home Assistant integration
 
 Share your rooftop solar production with [Kilowattlas](https://kilowattlas.com).
 The integration reads your existing solar **power** sensor, averages it into
@@ -31,11 +31,32 @@ The setup wizard uses a device-linking flow (no tokens to copy):
 From then on the integration pushes a 15-minute average of your production once
 per hour. You can see your own data on the Kilowattlas website.
 
-## Privacy
+## Privacy & data sharing
 
-Only 15-minute average power (kW), the slot timestamp, and the sample count are
-sent — tied to the site you registered, under your account. You can revoke the
+There are two separate kinds of data, treated differently:
+
+**Your production data** — the 15-minute average power (kW), the slot timestamp,
+and the sample count. This is tied to the site you registered, under your
+account. It is **not** shared publicly or with third parties. You can revoke the
 link anytime by removing the integration and deleting the site on the website.
+
+**Your site's static metadata** — its location, capacity, and source type
+(solar). By using this integration you agree that this metadata is contributed
+to the **OpenStreetMap** community via the [MapYourGrid](https://mapyourgrid.org)
+project, to help build an open map of the world's energy infrastructure.
+
+Please read this before you connect:
+
+- This applies **only** to static metadata (where the installation is and how big
+  it is). Your ongoing production readings are never shared this way.
+- OpenStreetMap data is published under the **Open Database License (ODbL)** and
+  is **public and permanent** — once contributed it can be downloaded and reused
+  by anyone, and cannot be fully retracted.
+- Your installation's location is derived from the coordinates you confirm during
+  setup. If you do not want your rooftop's location to become public OpenStreetMap
+  data, **do not connect this integration.**
+- No personal identifiers (your name, account, or email) are shared with
+  OpenStreetMap — only the installation's location, capacity, and source type.
 
 ## How it works
 

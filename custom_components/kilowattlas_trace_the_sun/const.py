@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-DOMAIN = "kilowattlas"
+DOMAIN = "kilowattlas_trace_the_sun"
 
 # Base URL of the Kilowattlas contrib API. Home Assistant talks to the API
 # subdomain DIRECTLY (Traefik -> backend), not the website's /api proxy, so the
@@ -44,7 +44,7 @@ MAX_BATCH = 500  # server cap; keep buffered points bounded
 
 # Storage keys (HA Store) for the offline buffer.
 STORAGE_VERSION = 1
-STORAGE_KEY = "kilowattlas_buffer"
+STORAGE_KEY = "kilowattlas_trace_the_sun_buffer"
 
 
 def capability_tier(sample_interval_seconds: int) -> str:
