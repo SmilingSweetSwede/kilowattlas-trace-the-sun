@@ -56,7 +56,8 @@ entities:
   - entity: sensor.kilowattlas_trace_the_sun_shared_production
 ```
 
-Or a richer combined card with the current value and status:
+Or a richer combined card with the current value, status, and a link to your
+installation on the Kilowattlas map:
 
 ```yaml
 type: vertical-stack
@@ -72,7 +73,17 @@ cards:
     hours_to_show: 24
     entities:
       - sensor.kilowattlas_trace_the_sun_shared_production
+  - type: markdown
+    content: >
+      [🗺️ View my installation on the Kilowattlas
+      map]({{ state_attr('sensor.kilowattlas_trace_the_sun_sharing_status',
+      'map_url') }})
 ```
+
+The last card renders a clickable **"View my installation on the Kilowattlas
+map"** link that opens the map centred on your installation. (The URL comes from
+the `map_url` attribute on the status sensor, so it always points at the right
+place.)
 
 > The exact `entity_id` may differ slightly on your system — open the entity in
 > Settings → Devices & Services → Entities to confirm it, and adjust the YAML.
