@@ -31,6 +31,52 @@ The setup wizard uses a device-linking flow (no tokens to copy):
 From then on the integration pushes a 15-minute average of your production every
 15 minutes. You can see your own data on the Kilowattlas website.
 
+## What you'll see in Home Assistant
+
+The integration adds two entities under the **Kilowattlas – Trace the Sun**
+device:
+
+- **Shared production** — the live solar power being shared (kW). Because it's a
+  proper power sensor, Home Assistant draws a history graph and keeps long-term
+  statistics automatically — click it to see today's curve.
+- **Sharing status** — Connected / Disconnected / Connection error, plus
+  attributes for when data was last sent, how many slots are buffered, and a
+  `map_url` link to your installation on the Kilowattlas map.
+
+### Add a graph card to your dashboard
+
+To show the production graph on your dashboard, add a card (Settings → Dashboards
+→ Edit → Add card → *Manual*) and paste:
+
+```yaml
+type: history-graph
+title: Solar shared to Kilowattlas
+hours_to_show: 24
+entities:
+  - entity: sensor.kilowattlas_trace_the_sun_shared_production
+```
+
+Or a richer combined card with the current value and status:
+
+```yaml
+type: vertical-stack
+cards:
+  - type: entities
+    title: Kilowattlas – Trace the Sun
+    entities:
+      - entity: sensor.kilowattlas_trace_the_sun_shared_production
+        name: Sharing now
+      - entity: sensor.kilowattlas_trace_the_sun_sharing_status
+        name: Status
+  - type: history-graph
+    hours_to_show: 24
+    entities:
+      - sensor.kilowattlas_trace_the_sun_shared_production
+```
+
+> The exact `entity_id` may differ slightly on your system — open the entity in
+> Settings → Devices & Services → Entities to confirm it, and adjust the YAML.
+
 ## Privacy & data sharing
 
 There are two separate kinds of data, treated differently:
