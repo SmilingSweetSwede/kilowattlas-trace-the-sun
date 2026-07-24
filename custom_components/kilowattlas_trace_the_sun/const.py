@@ -35,11 +35,14 @@ EP_DEVICE_TOKEN = "/api/v1/contrib/device/token"
 EP_INGEST = "/api/v1/contrib/solar"
 
 # Sampling + push cadence. Overridable via env vars for local testing so a
-# developer can watch data land in seconds instead of waiting a full slot/hour.
-# Production defaults: 15-min slots, hourly batched push.
+# developer can watch data land in seconds instead of waiting a full slot.
+# Production defaults: 15-min slots, pushed every 15 min (a completed slot goes
+# out on the next cycle, so data is at most ~15 min old). The push loop still
+# batches whatever completed slots are pending, so a backlog after an outage is
+# flushed together rather than one slot at a time.
 SAMPLE_INTERVAL_SECONDS = int(os.getenv("KILOWATTLAS_SAMPLE_SECONDS", "10"))
 SLOT_SECONDS = int(os.getenv("KILOWATTLAS_SLOT_SECONDS", str(15 * 60)))
-PUSH_INTERVAL_SECONDS = int(os.getenv("KILOWATTLAS_PUSH_SECONDS", str(60 * 60)))
+PUSH_INTERVAL_SECONDS = int(os.getenv("KILOWATTLAS_PUSH_SECONDS", str(15 * 60)))
 MAX_BATCH = 500  # server cap; keep buffered points bounded
 
 # Storage keys (HA Store) for the offline buffer.
