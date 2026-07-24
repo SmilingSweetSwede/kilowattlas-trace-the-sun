@@ -1,0 +1,145 @@
+"""Thin async client for the Kilowattlas contrib API."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+
+import aiohttp
+
+from .const import EP_DEVICE_CODE, EP_DEVICE_TOKEN, EP_INGEST
+
+
+async def _read_json(resp: aiohttp.ClientResponse) -> dict:
+    """Parse a JSON body tolerantly.
+
+    aiohttp's resp.json() raises ContentTypeError unless the server sends an
+    application/json content-type. A misconfigured API base (e.g. a host that
+    returns an HTML/text error page) would otherwise surface as an unhandled
+    500 in the config flow, so we decode the raw text ourselves and raise a
+    clean KilowattlasError when it isn't JSON.
+    """
+    text = await resp.text()
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError) as err:
+        snippet = text[:120].replace("\n", " ")
+        raise KilowattlasError(
+            f"expected JSON from the API but got: {snippet!r}"
+        ) from err
+
+
+class KilowattlasError(Exception):
+    """Generic API error."""
+
+
+class AuthorizationPending(KilowattlasError):
+    """The device code has not been approved on the web yet."""
+
+
+class AuthorizationExpired(KilowattlasError):
+    """The device code expired before it was approved."""
+
+
+@dataclass
+class DeviceCode:
+    """Response of the device-code request."""
+
+    device_code: str
+    user_code: str
+    verification_uri: str
+    interval: int
+    expires_in: int
+
+
+@dataclass
+class TokenGrant:
+    """Response of a successful token poll."""
+
+    token: str
+    site_id: int
+
+
+class KilowattlasClient:
+    """Talks to the Kilowattlas contrib endpoints over aiohttp."""
+
+    def __init__(self, session: aiohttp.ClientSession, api_base: str) -> None:
+        self._session = session
+        self._base = api_base.rstrip("/")
+
+    async def request_device_code(
+        self,
+        lat: float | None,
+        lng: float | None,
+        capability: dict | None = None,
+    ) -> DeviceCode:
+        """Start a device-authorization flow.
+
+        `capability` carries phase-2 readiness hints (sample_capability,
+        sample_interval_seconds, device_brand) so the backend records, at link
+        time, whether this donor could ever feed a low-latency stream. Optional
+        and forward-compatible: the backend ignores unknown/absent fields.
+        """
+        payload: dict = {}
+        if lat is not None:
+            payload["lat"] = lat
+        if lng is not None:
+            payload["lng"] = lng
+        if capability:
+            payload.update(capability)
+        try:
+            async with self._session.post(
+                f"{self._base}{EP_DEVICE_CODE}", json=payload
+            ) as resp:
+                if resp.status != 200:
+                    raise KilowattlasError(f"device/code returned {resp.status}")
+                data = await _read_json(resp)
+        except aiohttp.ClientError as err:
+            raise KilowattlasError(f"cannot reach {self._base}: {err}") from err
+        return DeviceCode(
+            device_code=data["device_code"],
+            user_code=data["user_code"],
+            verification_uri=data["verification_uri"],
+            interval=int(data.get("interval", 5)),
+            expires_in=int(data.get("expires_in", 900)),
+        )
+
+    async def poll_token(self, device_code: str) -> TokenGrant:
+        """Exchange an approved device code for the ingest token.
+
+        Raises AuthorizationPending while the user hasn't approved yet, and
+        AuthorizationExpired once the code is dead.
+        """
+        try:
+            async with self._session.post(
+                f"{self._base}{EP_DEVICE_TOKEN}", json={"device_code": device_code}
+            ) as resp:
+                data = await _read_json(resp)
+                status = resp.status
+        except aiohttp.ClientError as err:
+            raise KilowattlasError(f"cannot reach {self._base}: {err}") from err
+        if status == 200:
+            return TokenGrant(token=data["token"], site_id=int(data["site_id"]))
+        err = data.get("error", "")
+        if err == "authorization_pending":
+            raise AuthorizationPending
+        if err in ("expired_token", "invalid_grant"):
+            raise AuthorizationExpired
+        raise KilowattlasError(f"device/token error: {err or status}")
+
+    async def ingest(self, token: str, measurements: list[dict]) -> dict:
+        """Push a batch of 15-min measurements. Idempotent server-side."""
+        try:
+            async with self._session.post(
+                f"{self._base}{EP_INGEST}",
+                json={"measurements": measurements},
+                headers={"Authorization": f"Bearer {token}"},
+            ) as resp:
+                if resp.status == 401:
+                    raise KilowattlasError("unauthorized (token revoked?)")
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise KilowattlasError(f"ingest returned {resp.status}: {text}")
+                return await _read_json(resp)
+        except aiohttp.ClientError as err:
+            raise KilowattlasError(f"cannot reach {self._base}: {err}") from err

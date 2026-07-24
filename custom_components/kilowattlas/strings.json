@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Kilowattlas",
+        "description": "Home Assistant will request a linking code from Kilowattlas so you can share your solar production. Press Submit to continue."
+      },
+      "link": {
+        "title": "Approve the link",
+        "description": "Open this page and sign in to approve sharing:\n\n{verification_uri}\n\nYour code: **{user_code}**\n\nWhen you have approved it on the website, press Submit."
+      },
+      "sensor": {
+        "title": "Choose your solar sensor",
+        "description": "Select the power sensor that reports your solar production (in W, kW, or MW).",
+        "data": {
+          "power_sensor": "Solar power sensor"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach Kilowattlas. Check your connection and try again.",
+      "not_approved_yet": "The link hasn't been approved yet. Approve it on the website, then press Submit."
+    },
+    "abort": {
+      "expired": "The linking code expired. Please start over.",
+      "cannot_connect": "Could not reach Kilowattlas. Please start over.",
+      "already_configured": "This site is already connected."
+    }
+  }
+}

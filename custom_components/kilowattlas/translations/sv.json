@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Anslut till Kilowattlas",
+        "description": "Home Assistant hämtar en kopplingskod från Kilowattlas så att du kan dela din solelproduktion. Tryck på Skicka för att fortsätta."
+      },
+      "link": {
+        "title": "Godkänn kopplingen",
+        "description": "Öppna sidan och logga in för att godkänna delningen:\n\n{verification_uri}\n\nDin kod: **{user_code}**\n\nNär du har godkänt den på webbplatsen, tryck på Skicka."
+      },
+      "sensor": {
+        "title": "Välj din solcellssensor",
+        "description": "Välj den effektsensor som visar din solelproduktion (i W, kW eller MW).",
+        "data": {
+          "power_sensor": "Solcellseffekt-sensor"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Kunde inte nå Kilowattlas. Kontrollera anslutningen och försök igen.",
+      "not_approved_yet": "Kopplingen är inte godkänd ännu. Godkänn den på webbplatsen och tryck på Skicka."
+    },
+    "abort": {
+      "expired": "Kopplingskoden gick ut. Börja om.",
+      "cannot_connect": "Kunde inte nå Kilowattlas. Börja om.",
+      "already_configured": "Anläggningen är redan ansluten."
+    }
+  }
+}
