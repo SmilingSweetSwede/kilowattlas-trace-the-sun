@@ -19,14 +19,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, resolve_api_base
+from .const import DOMAIN, resolve_map_base
 from .coordinator import KilowattlasCoordinator
-
-# Where the public map lives (derived from the API base: api.kilowattlas.com ->
-# kilowattlas.com). The link opens the map centred on the installation.
-def _map_base() -> str:
-    base = resolve_api_base()  # e.g. https://api.kilowattlas.com
-    return base.replace("https://api.", "https://").replace("http://api.", "http://")
 
 
 async def async_setup_entry(
@@ -139,8 +133,9 @@ def _device_info(entry: ConfigEntry) -> dict:
 
 def _map_url(hass: HomeAssistant) -> str:
     """Public map URL centred on this HA instance's home position."""
+    base = resolve_map_base()
     lat = hass.config.latitude
     lng = hass.config.longitude
     if lat is None or lng is None:
-        return _map_base()
-    return f"{_map_base()}/?lat={lat}&lng={lng}&zoom=13"
+        return base
+    return f"{base}/?lat={lat}&lng={lng}&zoom=13"

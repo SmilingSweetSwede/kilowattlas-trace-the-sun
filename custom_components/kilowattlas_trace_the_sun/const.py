@@ -59,6 +59,20 @@ def resolve_api_base() -> str:
     return PROD_API_BASE
 
 
+# Public website (the map lives here, e.g. kilowattlas.com/?lat=..). This is a
+# SEPARATE host from the API base: the API is api.kilowattlas.com (backend), the
+# map is kilowattlas.com (frontend). The map URL only opens a browser tab — no
+# token is sent to it — so it needs no security validation, just its own
+# optional dev override.
+PROD_MAP_BASE = "https://kilowattlas.com"
+
+
+def resolve_map_base() -> str:
+    """Return the public map base URL: dev override if set, else production."""
+    override = os.getenv("KILOWATTLAS_MAP_BASE", "").strip()
+    return override.rstrip("/") if override else PROD_MAP_BASE
+
+
 # Config entry / options keys.
 CONF_API_BASE = "api_base"
 CONF_TOKEN = "token"
