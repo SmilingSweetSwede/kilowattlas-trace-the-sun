@@ -28,8 +28,8 @@ The setup wizard uses a device-linking flow (no tokens to copy):
    from Home Assistant — adjust it if needed, add the panel capacity, and approve.
 3. Back in Home Assistant, pick your solar power sensor. Done.
 
-From then on the integration pushes a 15-minute average of your production once
-per hour. You can see your own data on the Kilowattlas website.
+From then on the integration pushes a 15-minute average of your production every
+15 minutes. You can see your own data on the Kilowattlas website.
 
 ## Privacy & data sharing
 
@@ -62,6 +62,6 @@ Please read this before you connect:
 
 - Samples the sensor every ~10 s and averages each raw reading into its 15-min
   UTC slot (matching Kilowattlas's internal resolution).
-- Flushes completed slots hourly, batched, to `POST /api/v1/contrib/solar`.
+- Flushes completed slots every 15 minutes, batched, to `POST /api/v1/contrib/solar`.
 - Unsent slots persist across restarts; the server upsert makes resends
   idempotent, so nothing is duplicated or lost.
