@@ -174,8 +174,12 @@ class KilowattlasCoordinator:
         # The request as a whole succeeded (HTTP 200). Every slot in this batch
         # was either accepted (upserted, idempotent) or rejected as permanently
         # invalid (off-grid / over-capacity / etc.) — neither case benefits from
-        # a resend, so drop the whole batch from the buffer.
-        rejected_ts = {r.get("ts") for r in result.get("rejected", [])}
+        # a resend, so drop the whole batch from the buffer. Defensive parsing:
+        # the server response is untrusted, so tolerate a malformed `rejected`.
+        rejected = result.get("rejected", [])
+        rejected_ts = {
+            r.get("ts") for r in rejected if isinstance(r, dict)
+        } if isinstance(rejected, list) else set()
         for ts, _ in items:
             self._pending.pop(ts, None)
         await self._store.async_save(self._pending)

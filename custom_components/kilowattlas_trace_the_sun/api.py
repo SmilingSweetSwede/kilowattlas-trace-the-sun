@@ -96,10 +96,14 @@ class KilowattlasClient:
                 data = await _read_json(resp)
         except aiohttp.ClientError as err:
             raise KilowattlasError(f"cannot reach {self._base}: {err}") from err
+        if not isinstance(data, dict) or not all(
+            k in data for k in ("device_code", "user_code", "verification_uri")
+        ):
+            raise KilowattlasError("device/code returned an unexpected response")
         return DeviceCode(
-            device_code=data["device_code"],
-            user_code=data["user_code"],
-            verification_uri=data["verification_uri"],
+            device_code=str(data["device_code"]),
+            user_code=str(data["user_code"]),
+            verification_uri=str(data["verification_uri"]),
             interval=int(data.get("interval", 5)),
             expires_in=int(data.get("expires_in", 900)),
         )
@@ -118,8 +122,12 @@ class KilowattlasClient:
                 status = resp.status
         except aiohttp.ClientError as err:
             raise KilowattlasError(f"cannot reach {self._base}: {err}") from err
+        if not isinstance(data, dict):
+            raise KilowattlasError("device/token returned an unexpected response")
         if status == 200:
-            return TokenGrant(token=data["token"], site_id=int(data["site_id"]))
+            if "token" not in data or "site_id" not in data:
+                raise KilowattlasError("device/token missing token/site_id")
+            return TokenGrant(token=str(data["token"]), site_id=int(data["site_id"]))
         err = data.get("error", "")
         if err == "authorization_pending":
             raise AuthorizationPending
@@ -128,7 +136,12 @@ class KilowattlasClient:
         raise KilowattlasError(f"device/token error: {err or status}")
 
     async def ingest(self, token: str, measurements: list[dict]) -> dict:
-        """Push a batch of 15-min measurements. Idempotent server-side."""
+        """Push a batch of 15-min measurements. Idempotent server-side.
+
+        Always returns a dict. A server that answers 200 with a non-object body
+        is treated as an error rather than passed through, so a malicious or
+        broken server can't feed an unexpected type into the caller.
+        """
         try:
             async with self._session.post(
                 f"{self._base}{EP_INGEST}",
@@ -138,8 +151,13 @@ class KilowattlasClient:
                 if resp.status == 401:
                     raise KilowattlasError("unauthorized (token revoked?)")
                 if resp.status != 200:
-                    text = await resp.text()
+                    # Truncate + strip newlines: the body is server-controlled
+                    # and gets logged, so don't let it inject/spam the HA log.
+                    text = (await resp.text())[:200].replace("\n", " ")
                     raise KilowattlasError(f"ingest returned {resp.status}: {text}")
-                return await _read_json(resp)
+                data = await _read_json(resp)
         except aiohttp.ClientError as err:
             raise KilowattlasError(f"cannot reach {self._base}: {err}") from err
+        if not isinstance(data, dict):
+            raise KilowattlasError("ingest returned an unexpected (non-object) response")
+        return data

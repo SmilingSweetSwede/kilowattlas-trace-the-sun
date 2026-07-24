@@ -109,9 +109,12 @@ class KilowattlasConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        # User pressed Submit — poll a few times for approval.
-        deadline = self._device.expires_in
-        interval = max(self._device.interval, 3)
+        # User pressed Submit — poll a few times for approval. Both timings are
+        # server-supplied, so clamp them: a floor on the interval prevents a
+        # tight poll loop, and a ceiling on the deadline prevents a hostile
+        # server from making this step block for an unbounded time.
+        deadline = min(max(self._device.expires_in, 30), 900)
+        interval = min(max(self._device.interval, 3), 30)
         waited = 0
         while waited < deadline:
             try:

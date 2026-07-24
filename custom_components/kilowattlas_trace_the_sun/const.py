@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
+from urllib.parse import urlparse
+
+_LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "kilowattlas_trace_the_sun"
 
@@ -13,14 +17,46 @@ DOMAIN = "kilowattlas_trace_the_sun"
 #
 # End users never choose this — it always points at production. A developer can
 # override it for local testing by setting the KILOWATTLAS_API_BASE environment
-# variable on the Home Assistant process (e.g. KILOWATTLAS_API_BASE=http://backend:8050),
-# mirroring how the backend uses CONTRIB_VERIFICATION_URI in dev vs prod.
+# variable on the Home Assistant process, mirroring how the backend uses
+# CONTRIB_VERIFICATION_URI in dev vs prod.
 PROD_API_BASE = "https://api.kilowattlas.com"
 
 
+def _is_local_host(host: str) -> bool:
+    """True for loopback / container-local hosts allowed over plaintext in dev."""
+    host = (host or "").split(":")[0].lower()
+    return host in ("localhost", "127.0.0.1", "::1", "backend", "host.docker.internal")
+
+
 def resolve_api_base() -> str:
-    """Return the API base: the dev env override if set, else production."""
-    return os.getenv("KILOWATTLAS_API_BASE", "").strip() or PROD_API_BASE
+    """Return the API base: a validated dev env override if set, else production.
+
+    Security: the API base is where the bearer token is sent, so an unvalidated
+    override could exfiltrate the token to a plaintext or attacker-controlled
+    host. We therefore ONLY accept an override that is https:// (any host), or
+    http:// pointed at an explicit local dev host (localhost / 127.0.0.1 /
+    the Docker service name). Anything else is rejected and we fall back to the
+    hard-coded production base. A warning is logged whenever a non-prod base is
+    in use so it can't happen silently.
+    """
+    override = os.getenv("KILOWATTLAS_API_BASE", "").strip()
+    if not override:
+        return PROD_API_BASE
+
+    parsed = urlparse(override)
+    if parsed.scheme == "https" and parsed.netloc:
+        _LOGGER.warning("Using non-production API base (override): %s", override)
+        return override.rstrip("/")
+    if parsed.scheme == "http" and _is_local_host(parsed.netloc):
+        _LOGGER.warning("Using INSECURE local API base (dev only): %s", override)
+        return override.rstrip("/")
+
+    _LOGGER.error(
+        "Ignoring unsafe KILOWATTLAS_API_BASE %r (must be https:// or http://localhost); "
+        "falling back to production.",
+        override,
+    )
+    return PROD_API_BASE
 
 
 # Config entry / options keys.
