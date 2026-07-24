@@ -62,11 +62,13 @@ class KilowattlasCoordinator:
         client: KilowattlasClient,
         token: str,
         power_sensor: str,
+        site_id: int | None = None,
     ) -> None:
         self.hass = hass
         self._client = client
         self._token = token
         self._sensor = power_sensor
+        self._site_id = site_id
         self._store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
 
         # Accumulator for the slot currently being filled.
@@ -79,6 +81,42 @@ class KilowattlasCoordinator:
 
         self._unsub_sample = None
         self._unsub_push = None
+
+        # Observable state for the status sensor.
+        self._status: str = "starting"  # starting|ok|revoked|error
+        self._last_push: datetime | None = None
+        self._last_accepted: int = 0
+        self._listeners: list = []
+
+    # --- status observability (read by the sensor entity) --------------------
+
+    @property
+    def site_id(self) -> int | None:
+        return getattr(self, "_site_id", None)
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def last_push(self) -> datetime | None:
+        return self._last_push
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    @property
+    def last_accepted(self) -> int:
+        return self._last_accepted
+
+    def add_listener(self, cb) -> None:
+        """Register a callback fired whenever the status state changes."""
+        self._listeners.append(cb)
+
+    def _notify(self) -> None:
+        for cb in self._listeners:
+            cb()
 
     async def async_start(self) -> None:
         """Load any buffered points and start the sampling + push timers."""
@@ -169,6 +207,10 @@ class KilowattlasCoordinator:
             result = await self._client.ingest(self._token, measurements)
         except KilowattlasError as err:
             _LOGGER.warning("Kilowattlas push failed (will retry): %s", err)
+            # A revoked/unauthorized token won't recover on retry, so surface it
+            # distinctly; other failures are transient.
+            self._status = "revoked" if "unauthorized" in str(err) else "error"
+            self._notify()
             return  # keep buffer; retry next cycle
 
         # The request as a whole succeeded (HTTP 200). Every slot in this batch
@@ -183,9 +225,16 @@ class KilowattlasCoordinator:
         for ts, _ in items:
             self._pending.pop(ts, None)
         await self._store.async_save(self._pending)
+
+        accepted = result.get("accepted", 0)
+        self._status = "ok"
+        self._last_push = dt_util.utcnow()
+        self._last_accepted = accepted if isinstance(accepted, int) else 0
+        self._notify()
+
         _LOGGER.info(
             "Kilowattlas push: %d sent, %d accepted, %d rejected",
             len(measurements),
-            result.get("accepted", 0),
+            accepted,
             len(rejected_ts),
         )
