@@ -110,6 +110,14 @@ class KilowattlasCoordinator:
     def last_accepted(self) -> int:
         return self._last_accepted
 
+    @property
+    def current_power_kw(self) -> float | None:
+        """Running mean (kW) of the slot currently being filled, or None if the
+        sensor hasn't produced a usable sample yet this slot."""
+        if self._cur_count == 0:
+            return None
+        return round(self._cur_sum / self._cur_count, 3)
+
     def add_listener(self, cb) -> None:
         """Register a callback fired whenever the status state changes."""
         self._listeners.append(cb)
@@ -172,6 +180,8 @@ class KilowattlasCoordinator:
 
         self._cur_sum += kw
         self._cur_count += 1
+        # Let the production sensor reflect the latest reading.
+        self._notify()
 
     def _roll_slot(self, force: bool = False) -> None:
         """Finalise the current slot into the pending buffer."""
