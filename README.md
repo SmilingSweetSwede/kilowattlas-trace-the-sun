@@ -126,11 +126,13 @@ Settings → Devices & Services → *Kilowattlas – Trace the Sun* → ⋮ → 
 This immediately:
 
 - stops sampling and pushing,
-- removes the sensors and the local offline buffer.
+- removes the sensors and the local offline buffer, and
+- **revokes the sharing token** on Kilowattlas, so no further data can be sent
+  (best-effort — if your Home Assistant is offline at removal, the token is
+  disabled the next time you delete the installation on the website).
 
-It does **not** by itself delete anything stored on Kilowattlas — your
-installation and its production history remain on the server until you delete
-them there (below).
+It does **not** delete the production history already stored on Kilowattlas —
+that remains until you delete the installation there (below).
 
 **Delete your data (Kilowattlas side):**
 Sign in on the Kilowattlas website and delete your installation. This:

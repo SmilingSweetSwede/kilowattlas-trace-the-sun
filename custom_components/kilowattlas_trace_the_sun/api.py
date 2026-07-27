@@ -7,7 +7,7 @@ import json
 
 import aiohttp
 
-from .const import EP_DEVICE_CODE, EP_DEVICE_TOKEN, EP_INGEST
+from .const import EP_DEVICE_CODE, EP_DEVICE_TOKEN, EP_INGEST, EP_REVOKE
 
 
 async def _read_json(resp: aiohttp.ClientResponse) -> dict:
@@ -161,3 +161,21 @@ class KilowattlasClient:
         if not isinstance(data, dict):
             raise KilowattlasError("ingest returned an unexpected (non-object) response")
         return data
+
+    async def revoke(self, token: str) -> None:
+        """Disable this token's site server-side (called on integration removal).
+
+        Best-effort: raises KilowattlasError on failure so the caller can log it,
+        but removal should proceed regardless.
+        """
+        try:
+            async with self._session.post(
+                f"{self._base}{EP_REVOKE}",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as resp:
+                if resp.status not in (200, 401):
+                    text = (await resp.text())[:200].replace("\n", " ")
+                    raise KilowattlasError(f"revoke returned {resp.status}: {text}")
+                # 401 means the token was already invalid/revoked — that's fine.
+        except aiohttp.ClientError as err:
+            raise KilowattlasError(f"cannot reach {self._base}: {err}") from err

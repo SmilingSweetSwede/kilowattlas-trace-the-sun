@@ -83,6 +83,7 @@ CONF_POWER_SENSOR = "power_sensor"
 EP_DEVICE_CODE = "/api/v1/contrib/device/code"
 EP_DEVICE_TOKEN = "/api/v1/contrib/device/token"
 EP_INGEST = "/api/v1/contrib/solar"
+EP_REVOKE = "/api/v1/contrib/revoke"
 
 # Sampling + push cadence. Overridable via env vars for local testing so a
 # developer can watch data land in seconds instead of waiting a full slot.
