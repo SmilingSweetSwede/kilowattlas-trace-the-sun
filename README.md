@@ -29,7 +29,8 @@ The setup wizard uses a device-linking flow (no tokens to copy):
 3. Back in Home Assistant, pick your solar power sensor. Done.
 
 From then on the integration pushes a 15-minute average of your production every
-15 minutes. You can see your own data on the Kilowattlas website.
+15 minutes. Your production appears on the public Kilowattlas map (see
+*Privacy & data sharing* below).
 
 ## What you'll see in Home Assistant
 
@@ -94,7 +95,9 @@ There are two separate kinds of data, treated differently:
 
 **Your production data** — the 15-minute average power (kW), the slot timestamp,
 and the sample count. This is tied to the site you registered, under your
-account. It is **not** shared publicly or with third parties. To stop sharing and
+account. It is shown **publicly** on the Kilowattlas map, where anyone can see
+your installation's production at its location — but without any personal
+identifier (your name, account, or email are never shown). To stop sharing and
 erase this data, delete your installation on the Kilowattlas website — see
 *Stopping and removing* below.
 
