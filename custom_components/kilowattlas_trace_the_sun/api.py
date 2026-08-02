@@ -135,17 +135,27 @@ class KilowattlasClient:
             raise AuthorizationExpired
         raise KilowattlasError(f"device/token error: {err or status}")
 
-    async def ingest(self, token: str, measurements: list[dict]) -> dict:
-        """Push a batch of 15-min measurements. Idempotent server-side.
+    async def ingest(
+        self, token: str, measurements: list[dict], donor: dict | None = None
+    ) -> dict:
+        """Push a batch of slot measurements. Idempotent server-side.
+
+        `donor` is optional self-reported telemetry (measured sample rate, the
+        config version actually in effect). Servers that predate it ignore the
+        key. The 200 response may carry a `config` document — the caller applies
+        it; this layer just passes it through.
 
         Always returns a dict. A server that answers 200 with a non-object body
         is treated as an error rather than passed through, so a malicious or
         broken server can't feed an unexpected type into the caller.
         """
+        body: dict = {"measurements": measurements}
+        if donor:
+            body["donor"] = donor
         try:
             async with self._session.post(
                 f"{self._base}{EP_INGEST}",
-                json={"measurements": measurements},
+                json=body,
                 headers={"Authorization": f"Bearer {token}"},
             ) as resp:
                 if resp.status == 401:

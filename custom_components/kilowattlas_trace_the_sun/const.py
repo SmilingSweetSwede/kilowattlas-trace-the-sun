@@ -85,19 +85,116 @@ EP_DEVICE_TOKEN = "/api/v1/contrib/device/token"
 EP_INGEST = "/api/v1/contrib/solar"
 EP_REVOKE = "/api/v1/contrib/revoke"
 
-# Sampling + push cadence. Overridable via env vars for local testing so a
-# developer can watch data land in seconds instead of waiting a full slot.
-# Production defaults: 15-min slots, pushed every 15 min (a completed slot goes
-# out on the next cycle, so data is at most ~15 min old). The push loop still
-# batches whatever completed slots are pending, so a backlog after an outage is
-# flushed together rather than one slot at a time.
-SAMPLE_INTERVAL_SECONDS = int(os.getenv("KILOWATTLAS_SAMPLE_SECONDS", "10"))
-SLOT_SECONDS = int(os.getenv("KILOWATTLAS_SLOT_SECONDS", str(15 * 60)))
-PUSH_INTERVAL_SECONDS = int(os.getenv("KILOWATTLAS_PUSH_SECONDS", str(15 * 60)))
-MAX_BATCH = 500  # server cap; keep buffered points bounded
+# Sampling + push cadence.
+#
+# These are DEFAULTS ONLY. The authoritative values come from the server, which
+# sends a `config` document in the ingest (and device/token) response; the
+# coordinator applies it whenever its config_version increases. That is what lets
+# storage resolution be changed centrally instead of by updating every donor's
+# install. Until the plugin has heard from the server it runs on these — and
+# config_version 0 guarantees any server document wins.
+#
+# Slot size is the one that determines stored resolution: sampling faster than
+# the slot only makes the slot mean more accurate, it does not store more rows.
+DEFAULT_CONFIG: dict = {
+    "config_version": 0,
+    "slot_seconds": 15 * 60,
+    "push_interval_seconds": 15 * 60,
+    # Bounds on the sample PERIOD. max_ is the slowest we may sample (a ceiling
+    # on the interval is a floor on the rate); min_ is the fastest we are allowed
+    # to poll. Easy to invert by accident — see resolve_config().
+    "max_sample_interval_seconds": 10,
+    "min_sample_interval_seconds": 1,
+    "max_batch": 500,
+    # Off by default. A new plugin talking to an OLD server must not emit
+    # night-gap markers: that server would store them as genuine 0 kW rows,
+    # turning "inverter asleep" into "produced exactly zero" — the opposite of
+    # the intent. Only a server that understands markers turns this on.
+    "report_empty_slots": False,
+}
 
-# Storage keys (HA Store) for the offline buffer.
-STORAGE_VERSION = 1
+# Accepted range for each server-sent value. The server response is untrusted
+# input from the plugin's side (same posture as the defensive parsing in
+# coordinator._push), so a buggy or hostile document must not be able to cause a
+# ZeroDivisionError in the slot floor or a request storm from a 1 s push loop.
+CONFIG_CLAMPS: dict = {
+    "slot_seconds": (60, 3600),
+    "push_interval_seconds": (60, 3600),
+    "max_sample_interval_seconds": (1, 900),
+    "min_sample_interval_seconds": (1, 900),
+    "max_batch": (1, 5000),
+}
+
+# Env overrides for local testing. Unlike the old module constants these act as
+# PINS: a pinned field keeps its value and the server's is ignored, rather than
+# being silently overwritten on the first push — which would defeat the point of
+# setting the override at all.
+_ENV_PINS = {
+    "slot_seconds": "KILOWATTLAS_SLOT_SECONDS",
+    "push_interval_seconds": "KILOWATTLAS_PUSH_SECONDS",
+    "max_sample_interval_seconds": "KILOWATTLAS_SAMPLE_SECONDS",
+}
+
+
+def env_pinned_fields() -> dict:
+    """Config fields pinned by env var, as {field: int_value}.
+
+    Invalid values are ignored rather than raising: a typo in a dev env var
+    should not stop the integration from loading.
+    """
+    pins: dict = {}
+    for field, var in _ENV_PINS.items():
+        raw = os.getenv(var)
+        if raw is None:
+            continue
+        try:
+            pins[field] = int(raw)
+        except (TypeError, ValueError):
+            continue
+    return pins
+
+
+def resolve_config(base: dict, incoming: dict | None) -> dict:
+    """Merge a server config document onto `base`, clamped and validated.
+
+    Unknown keys are ignored, missing keys keep their current value, and every
+    known field is clamped. Env pins are applied last so they always win.
+    Returns a new dict; never mutates either argument.
+    """
+    cfg = dict(base)
+    for key, value in (incoming or {}).items():
+        if key not in cfg and key != "config_version":
+            continue  # unknown field — ignore, do not carry forward
+        if key == "report_empty_slots":
+            cfg[key] = bool(value)
+            continue
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            continue
+        if key in CONFIG_CLAMPS:
+            lo, hi = CONFIG_CLAMPS[key]
+            n = max(lo, min(hi, n))
+        cfg[key] = n
+
+    # A slot that doesn't divide the hour drifts relative to it, breaking the
+    # UTC-grid alignment the server validates against and the map assumes.
+    if 3600 % cfg["slot_seconds"] != 0:
+        cfg["slot_seconds"] = base["slot_seconds"]
+
+    # Guard the confusable pair: an inverted range would otherwise clamp the
+    # sample interval to nonsense.
+    if cfg["min_sample_interval_seconds"] > cfg["max_sample_interval_seconds"]:
+        cfg["min_sample_interval_seconds"] = base["min_sample_interval_seconds"]
+        cfg["max_sample_interval_seconds"] = base["max_sample_interval_seconds"]
+
+    cfg.update(env_pinned_fields())
+    return cfg
+
+
+# Storage keys (HA Store) for the offline buffer. v2 adds the persisted config
+# and tags each buffered slot with the slot size that produced it.
+STORAGE_VERSION = 2
 STORAGE_KEY = "kilowattlas_trace_the_sun_buffer"
 
 

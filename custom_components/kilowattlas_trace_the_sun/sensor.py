@@ -85,6 +85,23 @@ class KilowattlasStatusSensor(SensorEntity):
             "buffered_slots": self._coordinator.pending_count,
             "last_batch_accepted": self._coordinator.last_accepted,
             "site_id": self._coordinator.site_id,
+            # The cadence actually in effect. Without these the only way to tell
+            # whether a config change reached this donor is to read the HA log.
+            "slot_seconds": self._coordinator.slot_seconds,
+            "push_interval_seconds": self._coordinator.push_interval_seconds,
+            "sample_interval_seconds": self._coordinator.sample_interval_seconds,
+            "config_version": self._coordinator.config_version,
+            # What the sensor is measured to deliver, vs. how fast we poll it.
+            # None until a probe concludes (it never concludes on a dark panel).
+            "measured_sample_interval_seconds": (
+                self._coordinator.measured_sample_interval_seconds
+            ),
+            # Non-zero means reads are happening but returning unavailable /
+            # unknown / non-numeric — the signal for a misconfigured sensor,
+            # which was previously silent.
+            "unusable_samples_this_slot": (
+                self._coordinator.unusable_samples_this_slot
+            ),
             # Deep-link to the public map, centred on this installation's
             # position (HA's home coordinates, which seeded the site).
             "map_url": _map_url(self.hass),

@@ -29,10 +29,11 @@ from .const import (
     CONF_POWER_SENSOR,
     CONF_SITE_ID,
     CONF_TOKEN,
+    DEFAULT_CONFIG,
     DOMAIN,
-    SAMPLE_INTERVAL_SECONDS,
     capability_tier,
     resolve_api_base,
+    resolve_config,
 )
 
 
@@ -69,12 +70,17 @@ class KilowattlasConfigFlow(ConfigFlow, domain=DOMAIN):
         self._client = KilowattlasClient(session, api_base)
         self._api_base = api_base
 
-        # Report this donor's stream capability up front (phase-2 readiness): the
-        # rate we sample at classifies whether it could ever feed a low-latency
-        # TSO stream. The backend stores it on the site; nothing streams yet.
+        # Report a provisional stream capability up front (phase-2 readiness).
+        # This is only the rate we START at, since the sensor hasn't been chosen
+        # yet — the coordinator measures what the sensor actually delivers and
+        # reports the real figure via the donor block on each push, which is what
+        # the backend should trust.
+        initial_interval = resolve_config(DEFAULT_CONFIG, None)[
+            "max_sample_interval_seconds"
+        ]
         capability = {
-            "sample_capability": capability_tier(SAMPLE_INTERVAL_SECONDS),
-            "sample_interval_seconds": SAMPLE_INTERVAL_SECONDS,
+            "sample_capability": capability_tier(initial_interval),
+            "sample_interval_seconds": initial_interval,
         }
 
         try:

@@ -39,6 +39,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_TOKEN],
         entry.data[CONF_POWER_SENSOR],
         entry.data.get(CONF_SITE_ID),
+        entry.entry_id,
     )
     await coordinator.async_start()
 
