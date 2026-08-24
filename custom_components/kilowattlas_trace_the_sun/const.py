@@ -111,6 +111,10 @@ DEFAULT_CONFIG: dict = {
     # turning "inverter asleep" into "produced exactly zero" — the opposite of
     # the intent. Only a server that understands markers turns this on.
     "report_empty_slots": False,
+    # The rate the server would LIKE raw readings at. Advisory: the plugin
+    # forwards whatever the sensor produces, whenever it produces it, so this
+    # only tells a donor what would be useful — it never throttles or upsamples.
+    "raw_sample_interval_seconds": 10,
 }
 
 # Accepted range for each server-sent value. The server response is untrusted
@@ -123,6 +127,7 @@ CONFIG_CLAMPS: dict = {
     "max_sample_interval_seconds": (1, 900),
     "min_sample_interval_seconds": (1, 900),
     "max_batch": (1, 5000),
+    "raw_sample_interval_seconds": (1, 900),
 }
 
 # Env overrides for local testing. Unlike the old module constants these act as
@@ -192,9 +197,13 @@ def resolve_config(base: dict, incoming: dict | None) -> dict:
     return cfg
 
 
-# Storage keys (HA Store) for the offline buffer. v2 adds the persisted config
-# and tags each buffered slot with the slot size that produced it.
-STORAGE_VERSION = 2
+# Storage keys (HA Store) for the offline buffer.
+#   v2 added the persisted config and tagged each buffered slot with its size.
+#   v3 replaces the slot buffer with a raw-sample retry queue: the plugin no
+#      longer aggregates, so what persists is unsent READINGS, not slot means.
+#      Any v2 slot means found are carried into legacy_measurements and flushed
+#      once — the server still accepts that shape.
+STORAGE_VERSION = 3
 STORAGE_KEY = "kilowattlas_trace_the_sun_buffer"
 
 

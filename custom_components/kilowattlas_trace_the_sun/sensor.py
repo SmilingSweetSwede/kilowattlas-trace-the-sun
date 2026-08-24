@@ -82,26 +82,33 @@ class KilowattlasStatusSensor(SensorEntity):
         last = self._coordinator.last_push
         return {
             "last_sent": last.isoformat() if last else None,
-            "buffered_slots": self._coordinator.pending_count,
+            # Readings captured but not yet acknowledged. Normally 0 or a
+            # handful: every reading is sent on arrival, so a number that keeps
+            # climbing means sends are failing.
+            "queued_readings": self._coordinator.pending_count,
             "last_batch_accepted": self._coordinator.last_accepted,
+            # Non-zero means the server refused readings — a wrong unit, a
+            # sensor reading the meter instead of the inverter, a timestamp out
+            # of range. Surfaced because a silent rejection is indistinguishable
+            # from healthy operation.
+            "last_batch_rejected": self._coordinator.last_rejected,
             "site_id": self._coordinator.site_id,
-            # The cadence actually in effect. Without these the only way to tell
-            # whether a config change reached this donor is to read the HA log.
+            # What the server aggregates to. The plugin no longer needs this to
+            # do its job — it forwards raw readings — but it explains what the
+            # stored resolution will be.
             "slot_seconds": self._coordinator.slot_seconds,
-            "push_interval_seconds": self._coordinator.push_interval_seconds,
-            "sample_interval_seconds": self._coordinator.sample_interval_seconds,
+            "target_sample_interval_seconds": (
+                self._coordinator.raw_sample_interval_seconds
+            ),
             "config_version": self._coordinator.config_version,
-            # What the sensor is measured to deliver, vs. how fast we poll it.
-            # None until a probe concludes (it never concludes on a dark panel).
+            # What the sensor is measured to actually deliver. None until a probe
+            # concludes (it never concludes on a dark panel).
             "measured_sample_interval_seconds": (
                 self._coordinator.measured_sample_interval_seconds
             ),
-            # Non-zero means reads are happening but returning unavailable /
-            # unknown / non-numeric — the signal for a misconfigured sensor,
-            # which was previously silent.
-            "unusable_samples_this_slot": (
-                self._coordinator.unusable_samples_this_slot
-            ),
+            # Reads that returned unavailable / unknown / non-numeric, or a unit
+            # we cannot interpret — the signal for a misconfigured sensor.
+            "unusable_readings": self._coordinator.unusable_samples,
             # Deep-link to the public map, centred on this installation's
             # position (HA's home coordinates, which seeded the site).
             "map_url": _map_url(self.hass),

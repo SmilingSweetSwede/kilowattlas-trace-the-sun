@@ -136,9 +136,24 @@ class KilowattlasClient:
         raise KilowattlasError(f"device/token error: {err or status}")
 
     async def ingest(
-        self, token: str, measurements: list[dict], donor: dict | None = None
+        self,
+        token: str,
+        measurements: list[dict] | None = None,
+        donor: dict | None = None,
+        samples: list[dict] | None = None,
     ) -> dict:
-        """Push a batch of slot measurements. Idempotent server-side.
+        """Push readings. Idempotent server-side.
+
+        Two shapes, either or both:
+
+        `samples` — raw readings at whatever resolution the sensor produces,
+        each {ts, power_kw, channel_key?}. The server stages them and computes
+        the slot mean itself. This is the preferred path: it keeps full
+        resolution all the way to the server and needs no clock arithmetic here.
+
+        `measurements` — pre-aggregated slot means. Kept for servers that
+        predate raw ingest; a 400 "no_measurements" is how such a server
+        announces itself.
 
         `donor` is optional self-reported telemetry (measured sample rate, the
         config version actually in effect). Servers that predate it ignore the
@@ -149,7 +164,11 @@ class KilowattlasClient:
         is treated as an error rather than passed through, so a malicious or
         broken server can't feed an unexpected type into the caller.
         """
-        body: dict = {"measurements": measurements}
+        body: dict = {}
+        if measurements:
+            body["measurements"] = measurements
+        if samples:
+            body["samples"] = samples
         if donor:
             body["donor"] = donor
         try:

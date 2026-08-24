@@ -1,16 +1,27 @@
-"""Sampling + aggregation + push for a linked Kilowattlas site.
+"""Raw-sample capture + immediate push for a linked Kilowattlas site.
 
-Reads the chosen power sensor on a timer, averages each raw sample into its UTC
-slot, and flushes completed slots to the ingest endpoint. Unsent slots persist
-via HA Store so a network outage or restart never loses data — the server upsert
-makes resends idempotent.
+Subscribes to the chosen power sensor and forwards every reading to the ingest
+endpoint as soon as it arrives. The SERVER aggregates: it stages raw samples and
+computes the 15-minute means itself.
 
-Cadence is SERVER-DIRECTED: slot size, push interval and the allowed sampling
-range arrive in the ingest response and are applied when their config_version
-increases (see const.resolve_config). The plugin only picks its own sample rate,
-and only within the bounds the server allows — it measures what the sensor
-actually delivers rather than assuming a fixed rate, since a cloud-polled
-inverter and a local Modbus one differ by two orders of magnitude.
+This replaces the previous design, where the plugin averaged locally and pushed
+one value per quarter hour. Two things were wrong with that:
+
+  * The finest data the server could ever see was whatever the client chose to
+    compute. A donor whose inverter reports every second was flattened to a
+    single number per quarter before we ever saw it.
+  * Every non-HA client had to reimplement the same slot arithmetic to
+    contribute at all.
+
+What is kept from the old design is durability. Readings that fail to send are
+held in a persisted retry queue and go out on the next successful connection, so
+a network blip or a restart still loses nothing. What is NOT kept is waiting:
+there is no push timer. A reading is sent the moment it arrives, and the queue
+exists only for readings that could not be.
+
+Cadence is still SERVER-DIRECTED (slot size, retention, target sample rate arrive
+in the ingest response), but the plugin no longer needs slot size to do its job —
+it forwards timestamps untouched and lets the server bucket them.
 """
 
 from __future__ import annotations
@@ -47,9 +58,33 @@ PROBE_WINDOW_SECONDS = 300
 PROBE_STARTUP_DELAY_SECONDS = 60  # let HA's boot burst settle first
 PROBE_MIN_DELTAS = 5
 
+# Retry queue bounds.
+#
+# MAX_QUEUE caps memory and storage during a long outage. At one reading per
+# second an hour is 3600 rows, so this holds roughly an hour of the fastest
+# realistic donor. Past that the OLDEST are dropped: fresh data is worth more
+# than stale, and the server can no longer use samples older than an hour
+# anyway (its slot is rolled up and its raw rows pruned).
+MAX_QUEUE = 5000
+
+# Ceiling on rows per request, kept under the server's own max_batch so a drain
+# after an outage is split across several calls rather than rejected wholesale.
+MAX_SEND = 500
+
+# How long to wait before retrying after a failed send. Backs off so a server
+# that is down does not get hammered, but stays short enough that a brief blip
+# costs one interval, not a slot.
+RETRY_BASE_SECONDS = 10
+RETRY_MAX_SECONDS = 300
+
+# A send is triggered per reading. Coalesce anything arriving within this window
+# into one request: a sub-second sensor would otherwise generate a request per
+# reading, and batching a handful costs nothing in freshness.
+COALESCE_SECONDS = 1.0
+
 
 class KilowattlasStore(Store):
-    """Store that upgrades the v1 buffer in place.
+    """Store that upgrades older buffers in place.
 
     HA has no migrate_func constructor argument — migration is done by
     overriding _async_migrate_func on a Store subclass.
@@ -58,46 +93,44 @@ class KilowattlasStore(Store):
     async def _async_migrate_func(
         self, old_major_version: int, old_minor_version: int, old_data: dict
     ) -> dict:
-        """Upgrade the persisted buffer from v1 to v2.
+        """Upgrade the persisted buffer to v3 (raw sample queue).
 
-        v1 was a bare {iso_ts: {power_kw, samples}} map with no record of the
-        slot size that produced each entry. Everything in a v1 buffer was
-        produced at the then-current slot size, so tag it with that — reading the
-        env pin if one is set, since a developer's override was the only way v1
-        could have been anything other than 900 s.
+        v1/v2 held completed SLOT MEANS keyed by timestamp. Those are still
+        valid measurements and the server still accepts that shape, so they are
+        carried over into a separate list and flushed once on next connect
+        rather than discarded — a donor upgrading mid-outage keeps their data.
         """
         if old_major_version >= STORAGE_VERSION:
             return old_data
+
         legacy_slot = env_pinned_fields().get(
             "slot_seconds", DEFAULT_CONFIG["slot_seconds"]
         )
-        pending = {}
-        for ts, entry in (old_data or {}).items():
+        legacy: list[dict] = []
+        for ts, entry in (old_data or {}).get("pending", old_data or {}).items():
             if not isinstance(entry, dict):
                 continue
-            pending[ts] = {**entry, "slot_seconds": legacy_slot}
-        _LOGGER.info(
-            "Kilowattlas buffer migrated v%d -> v%d: %d slot(s) tagged %ds",
-            old_major_version,
-            STORAGE_VERSION,
-            len(pending),
-            legacy_slot,
-        )
+            legacy.append(
+                {
+                    "ts": ts,
+                    "power_kw": entry.get("power_kw"),
+                    "samples": entry.get("samples", 0),
+                    "slot_seconds": entry.get("slot_seconds", legacy_slot),
+                }
+            )
+        if legacy:
+            _LOGGER.info(
+                "Kilowattlas buffer migrated to v%d: %d pre-aggregated slot(s) "
+                "will be flushed once, then raw samples take over",
+                STORAGE_VERSION,
+                len(legacy),
+            )
         return {
             "config": resolve_config(DEFAULT_CONFIG, None),
-            "pending": pending,
+            "queue": [],
+            "legacy_measurements": legacy,
             "measured_sample_interval_seconds": None,
         }
-
-
-def _floor(ts: datetime, slot_seconds: int) -> datetime:
-    """Floor a UTC datetime to a slot boundary of the given size.
-
-    Takes the size explicitly because a slot-size change has to floor against
-    both the old and the new value.
-    """
-    epoch = int(ts.timestamp())
-    return datetime.fromtimestamp(epoch - (epoch % slot_seconds), tz=timezone.utc)
 
 
 def _to_kw(value: float, unit: str | None) -> float | None:
@@ -115,73 +148,64 @@ def _to_kw(value: float, unit: str | None) -> float | None:
 
 
 class KilowattlasCoordinator:
-    """Owns the sampling loop and the push loop for one config entry."""
+    """Captures sensor readings and forwards them to Kilowattlas immediately."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         client: KilowattlasClient,
         token: str,
-        power_sensor: str,
-        site_id: int | None = None,
-        entry_id: str | None = None,
+        site_id: int,
+        sensor: str,
+        entry_id: str,
     ) -> None:
         self.hass = hass
         self._client = client
         self._token = token
-        self._sensor = power_sensor
         self._site_id = site_id
-        # Per-entry storage key. A shared key would let two linked sites clobber
-        # each other's buffer — harmless when every site had identical cadence,
-        # actively corrupting now that slot size is per-site.
-        self._storage_key = f"{STORAGE_KEY}_{entry_id}" if entry_id else STORAGE_KEY
-        self._store: Store = KilowattlasStore(
-            hass, STORAGE_VERSION, self._storage_key
+        self._sensor = sensor
+
+        self._store = KilowattlasStore(
+            hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry_id}"
         )
 
-        # Effective (clamped) cadence policy. Starts at the baked-in defaults so
-        # the plugin works before it has ever heard from the server; any real
-        # server document outranks it (config_version 0).
-        self._cfg: dict = resolve_config(DEFAULT_CONFIG, None)
-        self._sample_interval: int = self._cfg["max_sample_interval_seconds"]
-        # The config version whose cadence is actually running. Distinct from
-        # _cfg["config_version"] only for the instant between receiving a
-        # document and finishing its application; reported to the server so a
-        # donor that failed to apply a change is distinguishable from one that
-        # never received it.
-        self._applied_version: int = self._cfg["config_version"]
+        # Readings captured but not yet acknowledged by the server.
+        self._queue: list[dict] = []
+        # Pre-aggregated slots inherited from an older version of this plugin.
+        self._legacy: list[dict] = []
 
-        # Accumulator for the slot currently being filled.
-        self._cur_slot: datetime | None = None
-        self._cur_sum = 0.0
-        self._cur_count = 0
-        self._cur_unusable = 0  # reads that happened but were unusable
+        self._config = resolve_config(DEFAULT_CONFIG, None)
+        self._listeners: list = []
 
-        # Completed-but-unsent slots:
-        # {iso_ts: {"power_kw": float, "samples": int, "slot_seconds": int}}.
-        self._pending: dict[str, dict] = {}
-
-        self._unsub_sample = None
-        self._unsub_push = None
+        self._unsub_state = None
+        self._unsub_retry = None
+        self._unsub_coalesce = None
         self._unsub_probe = None
         self._unsub_probe_daily = None
 
-        # Measured sensor refresh rate (seconds between distinct updates).
+        self._sending = False
+        self._retry_delay = RETRY_BASE_SECONDS
+
+        self._status = "starting"
+        self._last_push: datetime | None = None
+        self._last_accepted = 0
+        self._last_rejected = 0
+        self._current_kw: float | None = None
+        self._unusable = 0
+
         self._measured_interval: float | None = None
         self._probe_seen: list[datetime] = []
         self._probe_values: list[float] = []
 
-        # Observable state for the status sensor.
-        self._status: str = "starting"  # starting|ok|revoked|error
-        self._last_push: datetime | None = None
-        self._last_accepted: int = 0
-        self._listeners: list = []
+        # Guards against forwarding the same reading twice: HA fires a state
+        # event on attribute changes too, which repeat the same value.
+        self._last_ts: datetime | None = None
 
-    # --- status observability (read by the sensor entity) --------------------
+    # --- properties exposed to the sensor entities ---------------------------
 
     @property
     def site_id(self) -> int | None:
-        return getattr(self, "_site_id", None)
+        return self._site_id
 
     @property
     def status(self) -> str:
@@ -193,49 +217,52 @@ class KilowattlasCoordinator:
 
     @property
     def pending_count(self) -> int:
-        return len(self._pending)
+        return len(self._queue) + len(self._legacy)
 
     @property
     def last_accepted(self) -> int:
         return self._last_accepted
 
     @property
+    def last_rejected(self) -> int:
+        """Readings the server refused in the last batch.
+
+        Surfaced because the old design dropped a batch after any HTTP 200 and
+        never told anyone: a sensor reporting the wrong thing looked exactly
+        like a healthy one. A non-zero value here is the visible symptom.
+        """
+        return self._last_rejected
+
+    @property
     def slot_seconds(self) -> int:
-        return self._cfg["slot_seconds"]
+        return self._config["slot_seconds"]
 
     @property
-    def push_interval_seconds(self) -> int:
-        return self._cfg["push_interval_seconds"]
-
-    @property
-    def sample_interval_seconds(self) -> int:
-        return self._sample_interval
+    def raw_sample_interval_seconds(self) -> int:
+        """Server's target seconds between readings. Advisory only — the plugin
+        forwards whatever the sensor actually produces."""
+        return self._config.get("raw_sample_interval_seconds", 10)
 
     @property
     def config_version(self) -> int:
-        """The config version whose cadence is actually running."""
-        return self._applied_version
+        return self._config["config_version"]
 
     @property
     def measured_sample_interval_seconds(self) -> float | None:
         return self._measured_interval
 
     @property
-    def unusable_samples_this_slot(self) -> int:
-        return self._cur_unusable
+    def unusable_samples(self) -> int:
+        return self._unusable
 
     @property
     def current_power_kw(self) -> float | None:
-        """Running mean (kW) of the slot currently being filled, or None if the
-        sensor hasn't produced a usable sample yet this slot."""
-        if self._cur_count == 0:
-            return None
-        return round(self._cur_sum / self._cur_count, 3)
+        return self._current_kw
 
     def add_listener(self, cb) -> None:
-        """Register a callback fired whenever the status state changes."""
         self._listeners.append(cb)
 
+    @callback
     def _notify(self) -> None:
         for cb in self._listeners:
             cb()
@@ -243,188 +270,233 @@ class KilowattlasCoordinator:
     # --- lifecycle -----------------------------------------------------------
 
     async def async_start(self) -> None:
-        """Load the persisted buffer + config and start the timers."""
-        stored = await self._store.async_load()
-        if stored:
-            # v2 shape; the Store migrator upgrades v1 before we see it.
-            self._pending = stored.get("pending", {}) or {}
-            self._cfg = resolve_config(DEFAULT_CONFIG, stored.get("config"))
-            # The persisted config IS what we start running, so it is applied by
-            # definition — without this a restart would report version 0 and
-            # look like a donor that had regressed.
-            self._applied_version = self._cfg["config_version"]
-            measured = stored.get("measured_sample_interval_seconds")
-            if isinstance(measured, (int, float)):
-                self._measured_interval = float(measured)
-
-        self._sample_interval = self._clamp_sample_interval(
-            self._measured_interval or self._cfg["max_sample_interval_seconds"]
+        stored = await self._store.async_load() or {}
+        self._config = resolve_config(
+            DEFAULT_CONFIG, stored.get("config"), apply_env=True
         )
-        self._reschedule_timers()
+        self._queue = [q for q in stored.get("queue", []) if isinstance(q, dict)]
+        self._legacy = [
+            m for m in stored.get("legacy_measurements", []) if isinstance(m, dict)
+        ]
+        self._measured_interval = stored.get("measured_sample_interval_seconds")
 
-        # Probe after HA settles: during startup every integration writes state,
-        # which would measure HA's boot rather than the sensor.
+        # THE core subscription. Event-driven, not polled: a timer can only ever
+        # observe at the rate it ticks, so polling a 1 s sensor at 10 s throws
+        # away nine readings out of ten. Subscribing delivers every value the
+        # integration writes, at whatever rate it writes it — which is the
+        # fastest the data can possibly reach us.
+        self._unsub_state = async_track_state_change_event(
+            self.hass, [self._sensor], self._on_state
+        )
+
+        # Rate probe, unchanged in purpose: report what the donor ACHIEVES so
+        # the server can distinguish a declared capability from a real one.
         self._unsub_probe = async_call_later(
             self.hass, PROBE_STARTUP_DELAY_SECONDS, self._start_probe
         )
-        # Re-probe daily around local noon — a solar sensor is guaranteed to be
-        # varying then. A plain 24 h interval would eventually land at night and
-        # measure a sleeping inverter.
         self._unsub_probe_daily = async_track_time_change(
             self.hass, self._start_probe, hour=12, minute=0, second=0
         )
 
-        _LOGGER.info(
-            "Kilowattlas coordinator started: sensor=%s sample=%ds slot=%ds "
-            "push=%ds config_version=%d",
-            self._sensor,
-            self._sample_interval,
-            self._cfg["slot_seconds"],
-            self._cfg["push_interval_seconds"],
-            self._cfg["config_version"],
-        )
+        self._status = "connected"
+        self._notify()
+
+        # Anything left from a previous run goes out now rather than waiting for
+        # the next reading — which on a sleeping inverter could be hours.
+        if self._queue or self._legacy:
+            self.hass.async_create_task(self._send())
 
     async def async_stop(self) -> None:
-        """Stop timers and flush the current slot + pending buffer to disk."""
         for unsub in (
-            self._unsub_sample,
-            self._unsub_push,
+            self._unsub_state,
+            self._unsub_retry,
+            self._unsub_coalesce,
             self._unsub_probe,
             self._unsub_probe_daily,
         ):
             if unsub:
                 unsub()
-        self._unsub_sample = self._unsub_push = None
-        self._unsub_probe = self._unsub_probe_daily = None
-        self._roll_slot(force=True)
+        self._unsub_state = None
+        self._unsub_retry = None
+        self._unsub_coalesce = None
+        self._unsub_probe = None
+        self._unsub_probe_daily = None
+
+        # One last attempt: a clean shutdown should not strand readings that a
+        # single request would have delivered.
+        if self._queue or self._legacy:
+            try:
+                await self._send()
+            except Exception:  # noqa: BLE001 - shutdown must not raise
+                _LOGGER.debug("Kilowattlas final flush failed; queued for next start")
         await self._save()
 
     async def _save(self) -> None:
         await self._store.async_save(
             {
-                "config": self._cfg,
-                "pending": self._pending,
+                "config": self._config,
+                "queue": self._queue,
+                "legacy_measurements": self._legacy,
                 "measured_sample_interval_seconds": self._measured_interval,
             }
         )
 
-    def _reschedule_timers(self) -> None:
-        """(Re-)register the sample + push timers at the current cadence.
-
-        async_track_time_interval cannot change an interval in place, so a
-        cadence change means unsubscribe + re-subscribe. Safe to call repeatedly;
-        callers should only do so when a value actually changed, since
-        re-registering resets the timer phase.
-        """
-        if self._unsub_sample:
-            self._unsub_sample()
-        if self._unsub_push:
-            self._unsub_push()
-        self._unsub_sample = async_track_time_interval(
-            self.hass, self._sample, timedelta(seconds=self._sample_interval)
-        )
-        self._unsub_push = async_track_time_interval(
-            self.hass,
-            self._push,
-            timedelta(seconds=self._cfg["push_interval_seconds"]),
-        )
-
-    def _slot_start(self, ts: datetime) -> datetime:
-        """Floor a UTC datetime to the current (server-directed) slot boundary."""
-        return _floor(ts, self._cfg["slot_seconds"])
-
-    # --- sampling ------------------------------------------------------------
+    # --- capture -------------------------------------------------------------
 
     @callback
-    def _sample(self, _now) -> None:
-        """Read the sensor once and fold it into the current slot."""
-        # Advance the slot clock BEFORE reading. If the sensor is unavailable the
-        # read below returns early, so doing this after would mean a boundary is
-        # never noticed while the sensor is down — and the slot that was open
-        # when it went down would sit unfinalised instead of being emitted.
-        slot = self._slot_start(dt_util.utcnow())
-        if self._cur_slot is not None and slot != self._cur_slot:
-            self._roll_slot()
-        if self._cur_slot is None:
-            self._cur_slot = slot
-
-        state = self.hass.states.get(self._sensor)
+    def _on_state(self, event) -> None:
+        """Queue a reading and schedule an immediate send."""
+        state = event.data.get("new_state")
         if state is None or state.state in ("unknown", "unavailable", None, ""):
-            self._cur_unusable += 1
+            self._unusable += 1
+            self._notify()
             return
         try:
             raw = float(state.state)
         except (ValueError, TypeError):
-            self._cur_unusable += 1
-            return
-        unit = state.attributes.get("unit_of_measurement")
-        kw = _to_kw(raw, unit)
-        if kw is None:
-            self._cur_unusable += 1
+            self._unusable += 1
+            self._notify()
             return
 
-        self._cur_sum += kw
-        self._cur_count += 1
-        # Let the production sensor reflect the latest reading.
+        kw = _to_kw(raw, state.attributes.get("unit_of_measurement"))
+        if kw is None:
+            # An unrecognised unit is not a transient glitch — it means this
+            # sensor cannot be interpreted at all. Counted, not guessed at.
+            self._unusable += 1
+            self._notify()
+            return
+
+        # last_updated advances on every write by the integration, including
+        # ones that did not change the value — which is what we want, since a
+        # steady 4.2 kW for a minute is six real readings, not one.
+        ts = state.last_updated
+        if self._last_ts is not None and ts <= self._last_ts:
+            return  # attribute-only event, or a repeat; not new data
+        self._last_ts = ts
+
+        self._current_kw = round(kw, 3)
+        self._queue.append(
+            {"ts": ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "power_kw": round(kw, 3)}
+        )
+
+        # Drop from the FRONT when full: the server refuses samples older than an
+        # hour, so the oldest are the ones already worthless.
+        if len(self._queue) > MAX_QUEUE:
+            dropped = len(self._queue) - MAX_QUEUE
+            del self._queue[:dropped]
+            _LOGGER.warning(
+                "Kilowattlas queue full; dropped %d oldest reading(s)", dropped
+            )
+
+        self._schedule_send()
         self._notify()
 
-    def _roll_slot(self, force: bool = False) -> None:
-        """Finalise the current slot into the pending buffer.
+    @callback
+    def _schedule_send(self) -> None:
+        """Send almost immediately, coalescing a burst into one request."""
+        if self._unsub_coalesce or self._sending:
+            return  # a send is already imminent or in flight
 
-        A slot with no usable samples is emitted as an explicit zero marker when
-        the server asked for it: a sleeping inverter and an offline donor both
-        produce silence, and only the marker tells them apart downstream. The
-        zero is an inference, not a measurement, which is why the server records
-        it as is_estimated.
-        """
-        if self._cur_slot is None:
-            self._reset_accumulator()
+        @callback
+        def _fire(_now) -> None:
+            self._unsub_coalesce = None
+            self.hass.async_create_task(self._send())
+
+        self._unsub_coalesce = async_call_later(self.hass, COALESCE_SECONDS, _fire)
+
+    # --- send ----------------------------------------------------------------
+
+    async def _send(self) -> None:
+        """Push queued readings. Only what the server accepts leaves the queue."""
+        if self._sending:
+            return
+        if not self._queue and not self._legacy:
+            return
+        self._sending = True
+        try:
+            batch = self._queue[:MAX_SEND]
+            legacy = self._legacy[:MAX_SEND] if self._legacy else None
+
+            result = await self._client.ingest(
+                self._token,
+                measurements=legacy,
+                samples=batch or None,
+                donor=self._donor_report(),
+            )
+
+            # Only drop what was actually sent. Readings that arrived DURING the
+            # request are still at the tail and go out next time — slicing by
+            # count rather than clearing is what prevents that loss.
+            del self._queue[: len(batch)]
+            if legacy:
+                del self._legacy[: len(legacy)]
+
+            self._last_accepted = int(result.get("accepted", 0))
+            rejected = result.get("rejected") or []
+            self._last_rejected = len(rejected)
+            if rejected:
+                # Rejections are permanent-invalid, so resending is pointless —
+                # but they must be visible. The old version discarded them
+                # silently, which is how a misconfigured sensor could look
+                # healthy indefinitely.
+                reasons = {r.get("reason", "?") for r in rejected if isinstance(r, dict)}
+                _LOGGER.warning(
+                    "Kilowattlas rejected %d reading(s): %s",
+                    len(rejected),
+                    ", ".join(sorted(reasons)),
+                )
+
+            self._apply_config(result.get("config"))
+            self._last_push = dt_util.utcnow()
+            self._status = "connected"
+            self._retry_delay = RETRY_BASE_SECONDS
+            await self._save()
+
+            # More waiting (a drain after an outage) — keep going immediately.
+            if self._queue or self._legacy:
+                self._schedule_send()
+
+        except KilowattlasError as err:
+            # Nothing is dropped: the queue is exactly what retry exists for.
+            self._status = "retrying"
+            _LOGGER.debug("Kilowattlas send failed (%s); %d queued", err, len(self._queue))
+            await self._save()
+            self._schedule_retry()
+        finally:
+            self._sending = False
+            self._notify()
+
+    @callback
+    def _schedule_retry(self) -> None:
+        if self._unsub_retry:
             return
 
-        if self._cur_count == 0:
-            if self._cfg["report_empty_slots"] and self._cur_unusable > 0:
-                self._pending[self._iso(self._cur_slot)] = {
-                    "power_kw": 0.0,
-                    "samples": 0,
-                    "slot_seconds": self._cfg["slot_seconds"],
-                    "empty": True,
-                }
-            self._reset_accumulator()
-            return
+        @callback
+        def _fire(_now) -> None:
+            self._unsub_retry = None
+            self.hass.async_create_task(self._send())
 
-        mean_kw = round(self._cur_sum / self._cur_count, 3)
-        self._pending[self._iso(self._cur_slot)] = {
-            "power_kw": mean_kw,
-            "samples": self._cur_count,
-            "slot_seconds": self._cfg["slot_seconds"],
-        }
-        self._reset_accumulator()
+        self._unsub_retry = async_call_later(self.hass, self._retry_delay, _fire)
+        # Exponential backoff, capped: a server that is down for an hour should
+        # not be probed 360 times.
+        self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
 
-    def _reset_accumulator(self) -> None:
-        self._cur_slot = None
-        self._cur_sum = 0.0
-        self._cur_count = 0
-        self._cur_unusable = 0
-
-    @staticmethod
-    def _iso(ts: datetime) -> str:
-        return ts.isoformat().replace("+00:00", "Z")
+    def _donor_report(self) -> dict:
+        report: dict = {"config_version": self._config["config_version"]}
+        if self._measured_interval is not None:
+            report["measured_sample_interval_seconds"] = self._measured_interval
+            report["sample_capability"] = capability_tier(self._measured_interval)
+        return report
 
     # --- rate probe ----------------------------------------------------------
-
-    def _clamp_sample_interval(self, seconds: float) -> int:
-        lo = self._cfg["min_sample_interval_seconds"]
-        hi = self._cfg["max_sample_interval_seconds"]
-        return int(max(lo, min(hi, round(seconds))))
 
     @callback
     def _start_probe(self, _now=None) -> None:
         """Measure how often the sensor actually updates.
 
-        Subscribes instead of polling: polling can only observe the rate at which
-        we poll. Uses last_updated (advances on every write by the integration)
-        rather than last_changed (which a steady value never advances, so a
-        healthy sensor reporting a constant would look dead).
+        Still worth doing even though every reading is now forwarded: the server
+        uses it to tell a donor that CAN do 1 s from one that merely said so.
         """
         if self._unsub_probe:
             self._unsub_probe()
@@ -440,9 +512,7 @@ class KilowattlasCoordinator:
             unsub_events()
             self._finish_probe()
 
-        self._unsub_probe = async_call_later(
-            self.hass, PROBE_WINDOW_SECONDS, _finish
-        )
+        self._unsub_probe = async_call_later(self.hass, PROBE_WINDOW_SECONDS, _finish)
 
     @callback
     def _on_probe_event(self, event) -> None:
@@ -484,174 +554,33 @@ class KilowattlasCoordinator:
 
         # Median, not mean: one restart-induced gap or burst must not skew it.
         self._measured_interval = round(median(deltas), 3)
-        new_interval = self._clamp_sample_interval(self._measured_interval)
-        if new_interval != self._sample_interval:
-            self._sample_interval = new_interval
-            self._reschedule_timers()
         _LOGGER.info(
-            "Kilowattlas measured sensor rate: %.3fs -> sampling every %ds",
-            self._measured_interval,
-            self._sample_interval,
+            "Kilowattlas measured sensor rate: %.3fs", self._measured_interval
         )
         self._notify()
 
     # --- config --------------------------------------------------------------
 
     def _apply_config(self, incoming: dict | None) -> None:
-        """Apply a server config document, handling a slot-size change safely.
+        """Adopt a server config document if it is newer than what we hold.
 
-        The buffer is keyed by slot start, so entries produced under different
-        slot sizes are not interchangeable: a 900 s mean relabelled as a 300 s
-        slot is silently wrong data, and a 300 s key is simply off-grid for a
-        900 s server (rejected, then dropped without retry). So finalise and tag
-        the old-size work before switching, and let _push send one granularity
-        per request.
+        Slot size no longer changes anything the plugin does — the server buckets
+        the timestamps — but it is kept in state so the diagnostic sensor can
+        show what the server is aggregating to.
         """
         if not isinstance(incoming, dict):
             return
         try:
-            version = int(incoming.get("config_version", 0))
+            incoming_version = int(incoming.get("config_version", 0))
         except (TypeError, ValueError):
             return
-        if version <= self._cfg["config_version"]:
-            return  # idempotent: a repeated document must not reset timer phase
-
-        new_cfg = resolve_config(self._cfg, incoming)
-        old_slot = self._cfg["slot_seconds"]
-        new_slot = new_cfg["slot_seconds"]
-        cadence_changed = (
-            new_cfg["push_interval_seconds"] != self._cfg["push_interval_seconds"]
-            or new_cfg["max_sample_interval_seconds"]
-            != self._cfg["max_sample_interval_seconds"]
-            or new_cfg["min_sample_interval_seconds"]
-            != self._cfg["min_sample_interval_seconds"]
-        )
-
-        if new_slot == old_slot:
-            self._cfg = new_cfg
-            new_interval = self._clamp_sample_interval(
-                self._measured_interval or new_cfg["max_sample_interval_seconds"]
-            )
-            if new_interval != self._sample_interval:
-                self._sample_interval = new_interval
-                cadence_changed = True
-            if cadence_changed:
-                self._reschedule_timers()
-            self._applied_version = version  # cadence is now live
+        if incoming_version <= self._config["config_version"]:
             return
-
-        # Slot size is changing.
-        self._roll_slot(force=True)  # finalise in-flight work at the OLD size
-        for entry in self._pending.values():
-            entry.setdefault("slot_seconds", old_slot)
-        self._cfg = new_cfg
-        self._cur_slot = None
-        self._sample_interval = self._clamp_sample_interval(
-            self._measured_interval or new_cfg["max_sample_interval_seconds"]
-        )
-        self._reschedule_timers()
-        self._applied_version = version  # cadence is now live
+        self._config = resolve_config(self._config, incoming, apply_env=True)
         _LOGGER.info(
-            "Kilowattlas slot size changed %ds -> %ds (config_version %d); "
-            "%d buffered slot(s) will be flushed at the old size",
-            old_slot,
-            new_slot,
-            version,
-            len(self._pending),
+            "Kilowattlas applied server config v%d (slot %ds, target sample %ds)",
+            self._config["config_version"],
+            self._config["slot_seconds"],
+            self._config.get("raw_sample_interval_seconds", 10),
         )
-        # Drain the old-granularity backlog promptly rather than waiting a full
-        # push interval — it can only be sent while the server still accepts it.
-        if self._pending:
-            self.hass.async_create_task(self._push(None))
-
-    def _donor_report(self) -> dict:
-        """Self-report: what this donor achieves, and which config it is running.
-
-        config_version is the version whose cadence is ACTUALLY in effect — set
-        once the timers have been rescheduled, not merely once a document has
-        been received. That makes the server's config_version_ack answer "is this
-        donor caught up?", which is the whole point of the column: an ack that
-        equals config_version proves the change landed, and one that trails
-        identifies a stuck donor.
-        """
-        report: dict = {"config_version": self._applied_version}
-        if self._measured_interval is not None:
-            report["measured_sample_interval_seconds"] = self._measured_interval
-            report["sample_capability"] = capability_tier(
-                int(round(self._measured_interval))
-            )
-        return report
-
-    # --- push ----------------------------------------------------------------
-
-    async def _push(self, _now) -> None:
-        """Flush completed slots to the ingest endpoint, batched."""
-        # Roll the current slot only if it's already in the past.
-        if self._cur_slot is not None and self._cur_slot < self._slot_start(
-            dt_util.utcnow()
-        ):
-            self._roll_slot()
-
-        if not self._pending:
-            return
-
-        # Never mix granularities in one request: the server validates the whole
-        # batch against ONE slot size, so a mixed batch has part of it rejected —
-        # and rejected rows are dropped, not retried. Oldest granularity first;
-        # the next cycle picks up the rest.
-        items = sorted(self._pending.items())
-        oldest_slot = items[0][1].get("slot_seconds", self._cfg["slot_seconds"])
-        items = [
-            (ts, v)
-            for ts, v in items
-            if v.get("slot_seconds", self._cfg["slot_seconds"]) == oldest_slot
-        ][: self._cfg["max_batch"]]
-
-        measurements = []
-        for ts, v in items:
-            m = {"ts": ts, "power_kw": v["power_kw"], "samples": v["samples"]}
-            if v.get("empty"):
-                m["empty"] = True
-            measurements.append(m)
-
-        try:
-            result = await self._client.ingest(
-                self._token, measurements, donor=self._donor_report()
-            )
-        except KilowattlasError as err:
-            _LOGGER.warning("Kilowattlas push failed (will retry): %s", err)
-            # A revoked/unauthorized token won't recover on retry, so surface it
-            # distinctly; other failures are transient.
-            self._status = "revoked" if "unauthorized" in str(err) else "error"
-            self._notify()
-            return  # keep buffer; retry next cycle
-
-        # The request as a whole succeeded (HTTP 200). Every slot in this batch
-        # was either accepted (upserted, idempotent) or rejected as permanently
-        # invalid (off-grid / over-capacity / etc.) — neither case benefits from
-        # a resend, so drop the whole batch from the buffer. Defensive parsing:
-        # the server response is untrusted, so tolerate a malformed `rejected`.
-        rejected = result.get("rejected", [])
-        rejected_ts = {
-            r.get("ts") for r in rejected if isinstance(r, dict)
-        } if isinstance(rejected, list) else set()
-        for ts, _ in items:
-            self._pending.pop(ts, None)
-        await self._save()
-
-        accepted = result.get("accepted", 0)
-        self._status = "ok"
-        self._last_push = dt_util.utcnow()
-        self._last_accepted = accepted if isinstance(accepted, int) else 0
         self._notify()
-
-        _LOGGER.info(
-            "Kilowattlas push: %d sent, %d accepted, %d rejected",
-            len(measurements),
-            accepted,
-            len(rejected_ts),
-        )
-
-        # Apply any new cadence policy last, so it takes effect from the next
-        # cycle rather than mid-flush.
-        self._apply_config(result.get("config"))
