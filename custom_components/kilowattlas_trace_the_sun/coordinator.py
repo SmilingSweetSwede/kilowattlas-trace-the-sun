@@ -376,7 +376,10 @@ class KilowattlasCoordinator:
 
         self._current_kw = round(kw, 3)
         self._queue.append(
-            {"ts": ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # Millisecond precision: the server measures received_at − ts per
+            # sample, and a second-truncated ts would put up to 999 ms of
+            # artificial latency on every reading.
+            {"ts": ts.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
              "power_kw": round(kw, 3)}
         )
 
