@@ -1,12 +1,12 @@
 {
   "domain": "kilowattlas_trace_the_sun",
   "name": "Kilowattlas – Trace the Sun",
-  "codeowners": [],
+  "codeowners": ["@SmilingSweetSwede"],
   "config_flow": true,
   "documentation": "https://github.com/SmilingSweetSwede/kilowattlas-trace-the-sun",
   "integration_type": "service",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/SmilingSweetSwede/kilowattlas-trace-the-sun/issues",
   "requirements": [],
-  "version": "0.3.1"
+  "version": "0.3.2"
 }
