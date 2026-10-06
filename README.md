@@ -1,9 +1,10 @@
 # Kilowattlas – Trace the Sun · Home Assistant integration
 
 Share your rooftop solar production with [Kilowattlas](https://kilowattlas.com).
-The integration reads your existing solar **power** sensor, averages it into
-15-minute slots, and pushes those to Kilowattlas. Data is buffered locally, so a
-network outage or Home Assistant restart never loses readings.
+The integration reads your existing solar **power** sensor and sends each new
+reading to Kilowattlas as soon as it arrives. Readings that can't be sent right
+away are queued locally and sent later, so a short network outage or a Home
+Assistant restart loses nothing.
 
 ## Requirements
 
@@ -31,8 +32,8 @@ The setup wizard uses a device-linking flow (no tokens to copy):
    from Home Assistant — adjust it if needed, add the panel capacity, and approve.
 3. Back in Home Assistant, pick your solar power sensor. Done.
 
-From then on the integration pushes a 15-minute average of your production every
-15 minutes. Your production appears on the public Kilowattlas map (see
+From then on every reading from your sensor is sent to Kilowattlas, which turns
+them into 15-minute averages. Your production appears on the public Kilowattlas map (see
 *Privacy & data sharing* below).
 
 ## What you'll see in Home Assistant
@@ -44,7 +45,7 @@ device:
   proper power sensor, Home Assistant draws a history graph and keeps long-term
   statistics automatically — click it to see today's curve.
 - **Sharing status** — Connected / Disconnected / Connection error, plus
-  attributes for when data was last sent, how many slots are buffered, and a
+  attributes for when data was last sent, how many readings are queued, and a
   `map_url` link to your installation on the Kilowattlas map.
 
 ### Add a graph card to your dashboard
@@ -96,8 +97,9 @@ place.)
 
 There are two separate kinds of data, treated differently:
 
-**Your production data** — the 15-minute average power (kW), the slot timestamp,
-and the sample count. This is tied to the site you registered, under your
+**Your production data** — each power reading (kW) with its timestamp.
+Kilowattlas combines these into 15-minute averages and keeps the individual
+readings only briefly (2 hours by default). This is tied to the site you registered, under your
 account. It is shown **publicly** on the Kilowattlas map, where anyone can see
 your installation's production at its location — but without any personal
 identifier (your name, account, or email are never shown). To stop sharing and
@@ -155,8 +157,14 @@ contributed to OpenStreetMap and stays on the map, consistent with the
 
 ## How it works
 
-- Samples the sensor every ~10 s and averages each raw reading into its 15-min
-  UTC slot (matching Kilowattlas's internal resolution).
-- Flushes completed slots every 15 minutes, batched, to `POST /api/v1/contrib/solar`.
-- Unsent slots persist across restarts; the server upsert makes resends
-  idempotent, so nothing is duplicated or lost.
+- Listens for state changes on the chosen power sensor and forwards every
+  reading, with its original timestamp, to `POST /api/v1/contrib/solar`.
+  Readings arriving within about a second of each other go in one request.
+- Kilowattlas computes the 15-minute averages on the server; the integration
+  does no averaging of its own.
+- Readings that fail to send are kept in a queue that survives restarts and are
+  retried with backoff (10 s up to 5 min). The queue holds up to 5,000 readings,
+  about an hour at one reading per second; if it fills up, the oldest are
+  dropped first.
+- Slot size, retention and target sample rate are set by the server
+  and arrive with each response.
