@@ -14,10 +14,13 @@ network outage or Home Assistant restart never loses readings.
 
 ## Install (via HACS)
 
-1. In HACS → **Integrations** → ⋮ → **Custom repositories**, add this repo's URL
-   with category **Integration**.
+[![Open your Home Assistant instance and open this repository inside HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=SmilingSweetSwede&repository=kilowattlas-trace-the-sun&category=integration)
+
+1. Click the button above to open this repository in HACS, or add it manually:
+   HACS → ⋮ → **Custom repositories**, add this repo's URL with category
+   **Integration**.
 2. Install **Kilowattlas – Trace the Sun** and restart Home Assistant.
-3. **Settings → Devices & Services → Add Integration → Kilowattlas Solar Sharing**.
+3. **Settings → Devices & Services → Add Integration → Kilowattlas – Trace the Sun**.
 
 ## Linking
 
