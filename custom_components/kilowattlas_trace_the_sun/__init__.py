@@ -37,8 +37,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         client,
         entry.data[CONF_TOKEN],
-        entry.data[CONF_POWER_SENSOR],
+        # Positional order is (token, site_id, sensor): swapping these handed
+        # the site id to the state subscription, which wants an entity id.
         entry.data.get(CONF_SITE_ID),
+        entry.data[CONF_POWER_SENSOR],
         entry.entry_id,
     )
     await coordinator.async_start()

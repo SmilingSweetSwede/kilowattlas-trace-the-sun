@@ -41,8 +41,12 @@ async def async_setup_entry(
 # Human-readable labels for the coordinator's internal status codes.
 _STATUS_LABELS = {
     "starting": "Starting",
-    "ok": "Connected",
+    "connected": "Connected",
+    "retrying": "Connection error",
     "revoked": "Disconnected (access revoked)",
+    # Older status codes, kept so a stale value never falls outside the
+    # enum's options (HA rejects a state that is not one of them).
+    "ok": "Connected",
     "error": "Connection error",
 }
 
