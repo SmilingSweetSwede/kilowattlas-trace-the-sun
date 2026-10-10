@@ -271,9 +271,7 @@ class KilowattlasCoordinator:
 
     async def async_start(self) -> None:
         stored = await self._store.async_load() or {}
-        self._config = resolve_config(
-            DEFAULT_CONFIG, stored.get("config"), apply_env=True
-        )
+        self._config = resolve_config(DEFAULT_CONFIG, stored.get("config"))
         self._queue = [q for q in stored.get("queue", []) if isinstance(q, dict)]
         self._legacy = [
             m for m in stored.get("legacy_measurements", []) if isinstance(m, dict)
@@ -579,7 +577,7 @@ class KilowattlasCoordinator:
             return
         if incoming_version <= self._config["config_version"]:
             return
-        self._config = resolve_config(self._config, incoming, apply_env=True)
+        self._config = resolve_config(self._config, incoming)
         _LOGGER.info(
             "Kilowattlas applied server config v%d (slot %ds, target sample %ds)",
             self._config["config_version"],
